@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { google } = require('googleapis');
 const cors = require('cors');
+const os = require('os');
 require('dotenv').config();
 
 const app = express();
@@ -14,15 +15,12 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
-// 配置 multer 用於處理文件上傳
+// 配置 multer 用於處理文件上傳 - 使用臨時目錄適應 Vercel Serverless 環境
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = './uploads';
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir);
-    }
+    const uploadDir = os.tmpdir(); // 使用系統臨時目錄
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
@@ -32,7 +30,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 } // 限制文件大小為 10MB
+  limits: { fileSize: 100 * 1024 * 1024 } // 限制文件大小為 100MB
 });
 
 // Google Drive API 設置
@@ -104,6 +102,11 @@ async function uploadFileToDrive(filePath, fileName, folderId) {
   }
 }
 
+// 添加根路徑路由處理，解決 Vercel 404 問題
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 // API 路由
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   if (!req.file) {
@@ -125,7 +128,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     );
 
     // 上傳完成後刪除本地檔案
-    fs.unlinkSync(req.file.path);
+    try {
+      fs.unlinkSync(req.file.path);
+    } catch (err) {
+      console.warn('刪除臨時檔案時出錯:', err);
+      // 繼續處理，不讓刪除錯誤影響上傳成功
+    }
 
     res.json({
       success: true,
@@ -142,7 +150,14 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
+// Catch-all 路由處理未定義的路徑
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 // 啟動服務器
 app.listen(PORT, () => {
   console.log(`伺服器運行在端口 ${PORT}`);
 });
+
+module.exports = app; // 導出 app 以便 Vercel 可以使用
