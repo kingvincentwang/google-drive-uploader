@@ -98,7 +98,7 @@
     <div class="form-group">
       <label for="file-upload">選擇檔案：</label>
       <input type="file" id="file-upload" required>
-      <small>檔案大小無嚴格限制，大型檔案會自動分塊上傳</small>
+      <small>小於 10MB 的檔案將直接上傳，大於 10MB 的檔案將自動分塊上傳</small>
     </div>
     
     <button id="upload-btn">上傳到 Google Drive</button>
@@ -119,80 +119,101 @@
       const progress = document.querySelector('.progress');
       const resultBox = document.getElementById('result-box');
       
-      // 直接上傳到 Google Drive
-      async function directUpload(file, folderId) {
-        try {
-          // 步驟 1：獲取上傳 URL
-          const urlResponse = await fetch('/api/get-upload-url', {
+      // 生成唯一 ID 用於分塊上傳
+      function generateUUID() {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+          const r = Math.random() * 16 | 0;
+          const v = c === 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
+      }
+      
+      // 分塊上傳功能
+      async function uploadChunked(file, folderId) {
+        const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB 每塊
+        const uploadId = generateUUID();
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(file.size, start + CHUNK_SIZE);
+          const chunk = file.slice(start, end);
+          
+          // 更新進度
+          const percentComplete = Math.round((i / totalChunks) * 100);
+          progressBar.style.width = percentComplete + '%';
+          
+          // 構建查詢參數
+          const queryParams = new URLSearchParams({
+            fileName: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            folderId: folderId,
+            chunkIndex: i.toString(),
+            totalChunks: totalChunks.toString(),
+            uploadId: uploadId
+          }).toString();
+          
+          // 發送塊
+          const response = await fetch(`/api/upload-chunked?${queryParams}`, {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              fileName: file.name,
-              mimeType: file.type || 'application/octet-stream',
-              folderId: folderId
-            })
+            body: chunk
           });
           
-          if (!urlResponse.ok) {
-            const errorData = await urlResponse.json();
-            throw new Error(errorData.error || '無法獲取上傳網址');
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || '上傳塊失敗');
           }
           
-          const { uploadUrl, fileId } = await urlResponse.json();
+          const data = await response.json();
           
-          // 步驟 2：直接上傳檔案到 Google Drive
-          return new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            
-            // 監聽上傳進度
-            xhr.upload.addEventListener('progress', function(e) {
-              if (e.lengthComputable) {
-                const percentComplete = Math.round((e.loaded / e.total) * 100);
-                progressBar.style.width = percentComplete + '%';
-              }
-            });
-            
-            xhr.addEventListener('load', async function() {
-              if (xhr.status >= 200 && xhr.status < 300) {
-                // 步驟 3：確認上傳完成並獲取檔案資訊
-                const confirmResponse = await fetch('/api/confirm-upload', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json'
-                  },
-                  body: JSON.stringify({ fileId })
-                });
-                
-                if (!confirmResponse.ok) {
-                  reject(new Error('上傳完成，但無法獲取檔案資訊'));
-                  return;
-                }
-                
-                const fileData = await confirmResponse.json();
-                resolve(fileData);
-              } else {
-                reject(new Error('檔案上傳失敗'));
-              }
-            });
-            
-            xhr.addEventListener('error', function() {
-              reject(new Error('網絡錯誤，上傳失敗'));
-            });
-            
-            xhr.addEventListener('abort', function() {
-              reject(new Error('上傳被中止'));
-            });
-            
-            // 發送 PUT 請求上傳檔案
-            xhr.open('PUT', uploadUrl, true);
-            xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-            xhr.send(file);
-          });
-        } catch (error) {
-          throw error;
+          // 如果這是最後一個塊並且已成功上傳，則返回檔案資訊
+          if (i === totalChunks - 1 && data.file) {
+            return data;
+          }
         }
+      }
+      
+      // 常規上傳功能 (用於小檔案)
+      async function uploadRegular(file, folderId) {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('folderId', folderId);
+        
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          
+          xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+              const percentComplete = Math.round((e.loaded / e.total) * 100);
+              progressBar.style.width = percentComplete + '%';
+            }
+          });
+          
+          xhr.onload = function() {
+            if (xhr.status === 200) {
+              try {
+                const response = JSON.parse(xhr.responseText);
+                resolve(response);
+              } catch (e) {
+                reject(new Error('解析響應時出錯'));
+              }
+            } else {
+              try {
+                const error = JSON.parse(xhr.responseText);
+                reject(new Error(error.error || '上傳失敗'));
+              } catch (e) {
+                reject(new Error('上傳失敗'));
+              }
+            }
+          };
+          
+          xhr.onerror = function() {
+            reject(new Error('網絡錯誤，請稍後再試'));
+          };
+          
+          xhr.open('POST', '/api/upload', true);
+          xhr.send(formData);
+        });
       }
       
       uploadBtn.addEventListener('click', async function() {
@@ -216,8 +237,14 @@
         uploadBtn.disabled = true;
         
         try {
-          // 直接上傳到 Google Drive
-          const response = await directUpload(file, folderId.value.trim());
+          let response;
+          
+          // 根據文件大小選擇上傳方法
+          if (file.size > 10 * 1024 * 1024) { // 大於 10MB
+            response = await uploadChunked(file, folderId.value.trim());
+          } else {
+            response = await uploadRegular(file, folderId.value.trim());
+          }
           
           showResult(`
             <h3>上傳成功！</h3>
