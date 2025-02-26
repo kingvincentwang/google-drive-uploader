@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Drive 檔案上傳系統</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .container {
+      background-color: #f5f5f5;
+      border-radius: 5px;
+      padding: 20px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    h1 {
+      color: #333;
+      text-align: center;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+    input[type="text"],
+    input[type="file"] {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+    button {
+      background-color: #4285f4;
+      color: white;
+      border: none;
+      padding: 10px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    button:hover {
+      background-color: #3367d6;
+    }
+    .progress {
+      height: 20px;
+      margin-top: 10px;
+      background-color: #e0e0e0;
+      border-radius: 4px;
+      overflow: hidden;
+      display: none;
+    }
+    .progress-bar {
+      height: 100%;
+      background-color: #4285f4;
+      width: 0;
+      transition: width 0.3s;
+    }
+    .result {
+      margin-top: 20px;
+      padding: 15px;
+      border-radius: 4px;
+      display: none;
+    }
+    .success {
+      background-color: #d4edda;
+      border: 1px solid #c3e6cb;
+      color: #155724;
+    }
+    .error {
+      background-color: #f8d7da;
+      border: 1px solid #f5c6cb;
+      color: #721c24;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Google Drive 檔案上傳系統</h1>
+    
+    <div class="form-group">
+      <label for="folder-id">Google Drive 資料夾 ID：</label>
+      <input type="text" id="folder-id" placeholder="輸入Google Drive資料夾ID" required>
+      <small>（在Google Drive資料夾網址中找到：https://drive.google.com/drive/folders/[資料夾ID]）</small>
+    </div>
+    
+    <div class="form-group">
+      <label for="file-upload">選擇檔案：</label>
+      <input type="file" id="file-upload" required>
+    </div>
+    
+    <button id="upload-btn">上傳到 Google Drive</button>
+    
+    <div class="progress">
+      <div class="progress-bar"></div>
+    </div>
+    
+    <div class="result" id="result-box"></div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const uploadBtn = document.getElementById('upload-btn');
+      const fileUpload = document.getElementById('file-upload');
+      const folderId = document.getElementById('folder-id');
+      const progressBar = document.querySelector('.progress-bar');
+      const progress = document.querySelector('.progress');
+      const resultBox = document.getElementById('result-box');
+      
+      uploadBtn.addEventListener('click', async function() {
+        // 驗證表單
+        if (!fileUpload.files.length) {
+          showResult('請選擇要上傳的檔案', 'error');
+          return;
+        }
+        
+        if (!folderId.value.trim()) {
+          showResult('請輸入 Google Drive 資料夾 ID', 'error');
+          return;
+        }
+        
+        const file = fileUpload.files[0];
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('folderId', folderId.value.trim());
+        
+        // 重置進度條和結果
+        progress.style.display = 'block';
+        progressBar.style.width = '0%';
+        resultBox.style.display = 'none';
+        uploadBtn.disabled = true;
+        
+        try {
+          const xhr = new XMLHttpRequest();
+          
+          // 設置進度條更新
+          xhr.upload.addEventListener('progress', function(e) {
+            if (e.lengthComputable) {
+              const percentComplete = Math.round((e.loaded / e.total) * 100);
+              progressBar.style.width = percentComplete + '%';
+            }
+          });
+          
+          // 處理響應
+          xhr.onload = function() {
+            if (xhr.status === 200) {
+              const response = JSON.parse(xhr.responseText);
+			  const decodedName = decodeURIComponent(response.file.name); // 解碼檔案名稱
+              showResult(`
+                <h3>上傳成功！</h3>
+				  <p><strong>檔案名稱：</strong> ${decodedName}</p>
+				  <p><strong>Google Drive 鏈接：</strong> <a href="${response.file.link}" target="_blank">${response.file.link}</a></p>
+				`, 'success');
+              
+              // 重置表單
+              fileUpload.value = '';
+            } else {
+              let errorMsg = '上傳失敗';
+              try {
+                const error = JSON.parse(xhr.responseText);
+                errorMsg = error.error || errorMsg;
+              } catch (e) {}
+              
+              showResult(errorMsg, 'error');
+            }
+            uploadBtn.disabled = false;
+          };
+          
+          xhr.onerror = function() {
+            showResult('網絡錯誤，請稍後再試', 'error');
+            uploadBtn.disabled = false;
+          };
+          
+          // 發送請求
+          xhr.open('POST', '/api/upload', true);
+          xhr.send(formData);
+          
+        } catch (error) {
+          showResult(`發生錯誤: ${error.message}`, 'error');
+          uploadBtn.disabled = false;
+        }
+      });
+      
+      function showResult(message, type) {
+        resultBox.innerHTML = message;
+        resultBox.className = `result ${type}`;
+        resultBox.style.display = 'block';
+        progress.style.display = 'none';
+      }
+    });
+  </script>
+</body>
+</html>
