@@ -1,11 +1,7 @@
-// app.js - 主應用程式
 const express = require('express');
-const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
 const { google } = require('googleapis');
 const cors = require('cors');
-const os = require('os');
 require('dotenv').config();
 
 const app = express();
@@ -16,22 +12,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
-
-// 配置 multer 用於處理文件上傳 - 使用臨時目錄適應 Vercel Serverless 環境
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = os.tmpdir(); // 使用系統臨時目錄
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
-  }
-});
-
-const upload = multer({ 
-  storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 } // 限制文件大小為 100MB
-});
 
 // Google Drive API 設置
 function getAuthClient() {
@@ -48,109 +28,100 @@ function getAuthClient() {
   return auth;
 }
 
-// 上傳檔案到 Google Drive
-async function uploadFileToDrive(filePath, fileName, folderId) {
-  try {
-    console.log(`開始上傳文件: ${fileName} 到資料夾: ${folderId}`);
-    console.log(`本地文件路徑: ${filePath}`);
-    
-    // 確認檔案存在
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`本地檔案不存在: ${filePath}`);
-    }
-    
-    // 處理檔案名稱編碼
-    const encodedFileName = Buffer.from(fileName, 'binary').toString('utf8');
-    console.log(`處理後的檔案名稱: ${encodedFileName}`);
-    
-    const auth = getAuthClient();
-    const drive = google.drive({ version: 'v3', auth });
-
-    const fileMetadata = {
-      name: encodedFileName,
-      parents: [folderId]
-    };
-
-    console.log('準備上傳檔案到 Google Drive...');
-    
-    const media = {
-      mimeType: 'application/octet-stream',
-      body: fs.createReadStream(filePath)
-    };
-
-    try {
-      const response = await drive.files.create({
-        resource: fileMetadata,
-        media: media,
-        fields: 'id, name, webViewLink'
-      });
-      
-      console.log('檔案成功上傳到 Google Drive:', response.data);
-      return response.data;
-    } catch (driveError) {
-      console.error('Google Drive API 錯誤:', driveError);
-      
-      if (driveError.response) {
-        console.error('API 回應錯誤:', driveError.response.data);
-      }
-      
-      throw new Error(`Google Drive 上傳失敗: ${driveError.message}`);
-    }
-  } catch (error) {
-    console.error(`上傳檔案 ${fileName} 到 Google Drive 時發生錯誤:`, error);
-    throw error;
-  }
-}
-
-// 添加根路徑路由處理，解決 Vercel 404 問題
+// 根路徑路由
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// API 路由
-app.post('/api/upload', upload.single('file'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: '沒有檔案被上傳' });
-  }
-
+// 生成上傳網址的 API
+app.post('/api/get-upload-url', async (req, res) => {
   try {
-    const { folderId } = req.body;
+    const { fileName, mimeType, folderId } = req.body;
     
-    // 檢查是否提供了資料夾 ID
-    if (!folderId) {
-      return res.status(400).json({ error: '缺少 Google Drive 資料夾 ID' });
+    if (!fileName || !mimeType || !folderId) {
+      return res.status(400).json({ 
+        error: '缺少必要參數 (fileName, mimeType, folderId)' 
+      });
     }
 
-    const fileData = await uploadFileToDrive(
-      req.file.path,
-      req.file.originalname,
-      folderId
-    );
+    const auth = getAuthClient();
+    const drive = google.drive({ version: 'v3', auth });
 
-    // 上傳完成後刪除本地檔案
-    try {
-      fs.unlinkSync(req.file.path);
-    } catch (err) {
-      console.warn('刪除臨時檔案時出錯:', err);
-      // 繼續處理，不讓刪除錯誤影響上傳成功
-    }
+    // 建立媒體上傳初始請求
+    const fileMetadata = {
+      name: fileName,
+      parents: [folderId]
+    };
+
+    // 獲取上傳 URL
+    const response = await drive.files.create({
+      resource: fileMetadata,
+      media: {
+        mimeType: mimeType,
+        body: '' // 空的 body，因為我們只是獲取 URL
+      },
+      fields: 'id',
+      supportsAllDrives: true,
+      uploadType: 'resumable' // 使用可繼續上傳方式
+    }, {
+      // 不要自動上傳內容
+      onUploadProgress: () => {},
+    });
+
+    // 獲取上傳 URL 從響應頭
+    const uploadUrl = response.config.url;
 
     res.json({
       success: true,
-      message: '檔案上傳成功',
-      file: {
-        id: fileData.id,
-        name: fileData.name,
-        link: fileData.webViewLink
-      }
+      uploadUrl: uploadUrl,
+      fileId: response.data.id
     });
   } catch (error) {
-    console.error('處理上傳時發生錯誤:', error);
-    res.status(500).json({ error: '上傳處理失敗', details: error.message });
+    console.error('生成上傳網址時發生錯誤:', error);
+    res.status(500).json({ 
+      error: '無法生成上傳網址', 
+      details: error.message 
+    });
   }
 });
 
-// Catch-all 路由處理未定義的路徑
+// 確認上傳完成的 API
+app.post('/api/confirm-upload', async (req, res) => {
+  try {
+    const { fileId } = req.body;
+    
+    if (!fileId) {
+      return res.status(400).json({ error: '缺少檔案 ID' });
+    }
+
+    const auth = getAuthClient();
+    const drive = google.drive({ version: 'v3', auth });
+
+    // 獲取檔案資訊
+    const response = await drive.files.get({
+      fileId: fileId,
+      fields: 'id, name, webViewLink',
+      supportsAllDrives: true
+    });
+
+    res.json({
+      success: true,
+      file: {
+        id: response.data.id,
+        name: response.data.name,
+        link: response.data.webViewLink
+      }
+    });
+  } catch (error) {
+    console.error('確認上傳時發生錯誤:', error);
+    res.status(500).json({ 
+      error: '確認上傳失敗', 
+      details: error.message 
+    });
+  }
+});
+
+// Catch-all 路由
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -160,4 +131,4 @@ app.listen(PORT, () => {
   console.log(`伺服器運行在端口 ${PORT}`);
 });
 
-module.exports = app; // 導出 app 以便 Vercel 可以使用
+module.exports = app;
